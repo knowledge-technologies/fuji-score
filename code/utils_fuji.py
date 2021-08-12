@@ -3,15 +3,29 @@ from tqdm import trange
 import numpy as np
 import scipy.stats.stats as stats
 
+MEASURE_FUJI = "fuzzy_jaccard"
+MEASURE_JACCARD = "jaccard"
+MEASURE_HAMMING = "hamming"
+MEASURE_POG = "pog"
+MEASURE_NPOG = "npog"
+MEASURE_KUNCHEVA = "kuncheva"
+MEASURE_WALD = "wald"
+MEASURE_LUSTGARTEN = "lustgarten"
+MEASURE_KRIZEK = "krizek"
+MEASURE_CWREL = "cwrel"
+MEASURE_PEARSON = "pearson"
+MEASURE_CORRELATION = "correlation"
+MEASAURE_FUZZY_GAMMA = "fuzzy_gamma"
 ALLOWED_MEASURES = [
-    "fuzzy_jaccard", "jaccard", "hamming", "pog", "npog", "kuncheva", "wald",
-    "lustgarten", "krizek", "cwrel", "pearson", "correlation", "fuzzy_gamma"
+    MEASURE_FUJI, MEASURE_JACCARD, MEASURE_HAMMING, MEASURE_POG, MEASURE_NPOG,
+    MEASURE_KUNCHEVA, MEASURE_WALD, MEASURE_LUSTGARTEN, MEASURE_KRIZEK,
+    MEASURE_CWREL, MEASURE_PEARSON, MEASURE_CORRELATION, MEASAURE_FUZZY_GAMMA
 ]
 
 STEP_1 = 1
 STEP_SQUARED = "squared"
 STEP_EXP = "exp"
-ALLOWED_STEPS = [STEP_1, STEP_SQUARED, STEP_EXP]
+ALLOWED_STEPS = [STEP_SQUARED, STEP_EXP]
 
 IMPORTANCE_HANDLER_RAISE = "raise"
 IMPORTANCE_HANDLER_CORRECT = "correct"
@@ -21,22 +35,47 @@ ALLOWED_IMPORTANCE_HANDLERS = [
 
 
 class Fimp:
-    def __init__(self, feature_dictionary: Dict[str, Tuple[int, List[int],
-                                                           List[float]]]):
+    def __init__(self, feature_dictionary: Dict[str, Tuple[int, List[int], List[float]]]):
         """
-        Creates a feature importance structure.
+        Creates a feature importance structure (applicable to any ranked list where
+        the higher score, the better the item).
         :param feature_dictionary: A dictionary of the form
-         {feature name: (feature index, feature ranks, feature importances)}. The lengths of the last two items in each
-         value triplet are the same, and they correspond to the number of feature rankings stored in the Fimp structure.
-          Taking i-th components of these two lists, gives us the ranks and importances from the i-th feature ranking,
-          for all features.
+         {feature name: (feature index, feature ranks, feature importance scores), ...}.
+         Feature index is the index of the column in the dataset that belongs to this feature
+         (1-based).
+
+         Feature rank is 1 + the number of features that have higher importance that the feature
+         (+1 for 1-based ranks)
+
+         The structure is able to store multiple rankings at the same time and
+         the i-th element of feature ranks and feature importance scores correspond to the
+         rank and the score of the feature in the i-th ranking.
+
+         For example, given a dataset of features x1, x2, x3 and their importance scores
+         [1.0, 1.7, 1.5] and [3.0, 2.0, 1.0], the corresponding dictionary is
+         {
+            'x1': (1, [3, 1], [1.0, 3.0]),
+            'x2': (2, [1, 2], [1.7, 2.0]),
+            'x3': (3, [2, 3], [1.5, 1.0])
+         }.
+         The three components of the triplet values read as follows:
+         1. Feature indices of x1, x2, x3 are 1, 2 and 3, respectively
+         2. The ranks of the features in the first ranking are 3, 1, 2, respectively, i.e.,
+            in the first ranking, feature x2 has the highest score (and thus rank 1),
+            feature x3 has the second highest score (and thus rank 2), etc.
+            The ranks of the features in the second ranking are 1, 2, 3, i.e,
+            feature x1 has the highest score, feature x2 has the second highest score, etc.
+         3. The feature importance scores in the first ranking are 1.0, 1.7 and 1.5.
+            The feature importance scores in the second ranking are 3.0, 2.0 and 1.0.
         """
         self.table = []  # [[dataset index, name, ranks, relevances], ...]
         self.features = {}  # {name: [dataset index, ranks, relevances], ...}
         self.features = feature_dictionary
         for attr in feature_dictionary:
             row = [
-                feature_dictionary[attr][0], attr, feature_dictionary[attr][1],
+                feature_dictionary[attr][0],
+                attr,
+                feature_dictionary[attr][1],
                 feature_dictionary[attr][2]
             ]
             self.table.append(row)
@@ -72,17 +111,28 @@ class Fimp:
         return self.features[feature_name][-2][i]
 
     @staticmethod
-    def create_fimp_from_relevances(feature_relavance_scores,
-                                    feature_names: Union[List[str],
-                                                         None] = None,
-                                    feature_indices: Union[List[int],
-                                                           None] = None):
+    def create_fimp_from_relevances(
+            feature_relavance_scores,
+            feature_names: Union[List[str], None] = None,
+            feature_indices: Union[List[int], None] = None):
+        """
+        Creates a Fimp object from feature relevance scores,
+        feature names (optionally), and feature indices in dataset (optionally).
+        The object contains a single ranking.
+        :param feature_relavance_scores: array-like structure of floats
+        :param feature_names: array-like structure of strings (names) or None. If None,
+        generic feature names (['feature1', 'feature2', ...]) are created.
+        If feature_indices are given, e.g., [3, 1, ...],
+         the names are created using this indices, i.e., ['feature3', 'feature1', ...]
+        :param feature_indices: array-like structure of ints (feature indices) or None.
+        If None, a generic indices are created [1, 2, ...].
+        :return: a Fimp
+        """
         n = len(feature_relavance_scores)
         if feature_indices is None:
-            feature_indices = [i + 1 for i in range(n)]
+            feature_indices = list(range(1, n + 1))
         if feature_names is None:
-            assert isinstance(feature_indices, list)
-            feature_names = ["a{}".format(i) for i in feature_indices]
+            feature_names = ["feature{}".format(i) for i in feature_indices]
         # compute ranks
         ranks = [-1 for _ in range(n)]
         relevances_positions = list(zip(feature_relavance_scores, range(n)))
@@ -90,8 +140,7 @@ class Fimp:
         rank = 0
         for i, relevance_position in enumerate(relevances_positions):
             relevance, position = relevance_position
-            if i == 0 or abs(relevance -
-                             relevances_positions[i - 1][0]) > 10**-12:
+            if i == 0 or abs(relevance - relevances_positions[i - 1][0]) > 10 ** -12:
                 rank = i + 1
             ranks[position] = rank
         d = {
@@ -103,9 +152,35 @@ class Fimp:
 
 
 def compute_similarity_helper(fimp1: Fimp, fimp2: Fimp,
-                              similarity_measure: str, eps: float,
-                              step: Union[str, int], use_tqdm: bool,
+                              similarity_measure: str,
+                              eps: float, step: Union[str, int],
+                              use_tqdm: bool,
                               negative_importances_handler: str):
+    """
+    Computes one of the similarity measures for the two ranked lists, stored as Fimps.
+    :param fimp1: the first ranked list structure
+    :param fimp2: the second ranked list structure
+    :param similarity_measure: an element of ALLOWED_MEASURES
+    :param eps: applicable if similarity_measure is 'fuzzy_jaccard'; in that case,
+        the threshold under which the scores are considered to be 0
+    :param step:  applicable if similarity_measure is 'fuzzy_jaccard'; in that case,
+       the number of items to add before computing the next similarity;
+       The possible values are
+       any positive integer s, 'squared' and 'exp': the corresponding feature subset sizes are
+       - integer s: [1, 1 + s, 1 + 2s, 1 + 3s,  ...]
+       - 'squared': [1, 4, 9, 16, 25, ...]
+       - 'exp': [1, 2, 4, 8, 16, 32, ...]
+       It is assured that the last size always equals the number of features.
+    :param use_tqdm: if set to True, a progress bar is shown.
+       If set to None, the progress is shown for larger numbers of features
+    :param negative_importances_handler: applicable if similarity measure is 'fuzzy_jaccard';
+       in that case,  either 'raise' or 'correct'; tells how to handle negative scores:
+       if set to 'raise', ValueError is raised when a negative score is encountered,
+       otherwise, negative values are set to 0
+    :return: A list of similarities of the feature sets of the i top ranked features, where
+    i ranges over the considered feature sizes.
+    """
+
     def fuzzy_jaccard(f1: Fimp, f2: Fimp):
         def relative_score(absolute_score, normalisation_factor):
             if normalisation_factor == 0.0:
@@ -133,15 +208,15 @@ def compute_similarity_helper(fimp1: Fimp, fimp2: Fimp,
                             negative_importances_handler))
         if isinstance(step, str):
             feature_subset_sizes = []
-            if step == "exp":
+            if step == STEP_EXP:
                 i = 1
                 while i <= n:
                     feature_subset_sizes.append(i - 1)
                     i *= 2
-            elif step == "squared":
+            elif step == STEP_SQUARED:
                 i = 1
-                while i**2 <= n:
-                    feature_subset_sizes.append(i**2 - 1)
+                while i ** 2 <= n:
+                    feature_subset_sizes.append(i ** 2 - 1)
                     i += 1
             else:
                 raise ValueError("Wrong step specification: {}".format(step))
@@ -259,14 +334,14 @@ def compute_similarity_helper(fimp1: Fimp, fimp2: Fimp,
                 results[i] = len(intersection) / k
             elif measure in ["npog", "kuncheva", "wald", "pearson"]:
                 if k < n:
-                    results[i] = (len(intersection) - k**2 / n) / (k -
-                                                                   k**2 / n)
+                    results[i] = (len(intersection) - k ** 2 / n) / (k -
+                                                                     k ** 2 / n)
                 else:
                     results[i] = 1.0
             elif measure == "lustgarten":
                 if k < n:
                     results[i] = (len(intersection) -
-                                  k**2 / n) / (k - max(0, 2 * k - n))
+                                  k ** 2 / n) / (k - max(0, 2 * k - n))
                 else:
                     results[i] = 1.0
             elif measure == "krizek":
@@ -280,9 +355,9 @@ def compute_similarity_helper(fimp1: Fimp, fimp2: Fimp,
                 d = n_capital % y
                 h = n_capital % 2  # 2: number of feature subsets
                 numerator = y * (n_capital - d +
-                                 2 * len(intersection)) - n_capital**2 + d**2
-                nominator = y * (h**2 + 2 *
-                                 (n_capital - h) - d) - n_capital**2 + d**2
+                                 2 * len(intersection)) - n_capital ** 2 + d ** 2
+                nominator = y * (h ** 2 + 2 *
+                                 (n_capital - h) - d) - n_capital ** 2 + d ** 2
                 if k < n:
                     results[i] = numerator / nominator
                 else:
@@ -293,7 +368,8 @@ def compute_similarity_helper(fimp1: Fimp, fimp2: Fimp,
 
     def fuzzy_gamma(f1: Fimp, f2: Fimp):
         # S. Henzgen, E. Hüllermeier.
-        # Weighted Rank Correlation: A Flexible Approach based on Fuzzy Order Realtions. ECML/PKDD 2015.
+        # Weighted Rank Correlation: A Flexible Approach based on Fuzzy Order Realtions.
+        # ECML/PKDD 2015.
         def distance(rank1, rank2):
             if rank1 == rank2:
                 return 0.0
@@ -329,7 +405,7 @@ def compute_similarity_helper(fimp1: Fimp, fimp2: Fimp,
         c_total = 0.0
         d_total = 0.0
         iterator = trange(n) if (
-            use_tqdm or use_tqdm is None and n > 1000) else range(n)
+                use_tqdm or use_tqdm is None and n > 1000) else range(n)
         for i in iterator:
             a1, a2 = attributes[0][i], attributes[1][i]
             new_features = set()
@@ -362,23 +438,28 @@ def compute_similarity_helper(fimp1: Fimp, fimp2: Fimp,
         fimp.sort_by_feature_index()
     if fimp1.get_feature_names() != fimp2.get_feature_names():
         raise ValueError("Names of the attributes are not the same")
-    if similarity_measure == "fuzzy_jaccard":
+    if similarity_measure == MEASURE_FUJI:
         return fuzzy_jaccard(fimp1, fimp2)
-    elif similarity_measure == "correlation":
+    elif similarity_measure == MEASURE_CORRELATION:
         return correlation(fimp1, fimp2)
     elif similarity_measure in [
-            "jaccard", "hamming", "pog", "npog", "kuncheva", "wald",
-            "lustgarten", "krizek", "cwrel", "pearson"
+        MEASURE_JACCARD, MEASURE_HAMMING, MEASURE_POG, MEASURE_NPOG, MEASURE_KUNCHEVA,
+        MEASURE_WALD, MEASURE_LUSTGARTEN, MEASURE_KRIZEK, MEASURE_CWREL, MEASURE_PEARSON
     ]:
         return jaccard_hamming_pog_npog_kuncheva_lustgarten_wald_krizek_cwrel_pearson(
             fimp1, fimp2, similarity_measure)
-    elif similarity_measure == "fuzzy_gamma":
+    elif similarity_measure == MEASAURE_FUZZY_GAMMA:
         return fuzzy_gamma(fimp1, fimp2)
     else:
         raise ValueError("Wrong Error measure: {}".format(similarity_measure))
 
 
 def area_under_the_curve(points):
+    """
+    Computes area under the curve (i, points[i]), i.e., assumes that x-values are at distance 1.
+    :param points:
+    :return:
+    """
     n = len(points) - 1
     a = 0.0
     for i in range(n):
